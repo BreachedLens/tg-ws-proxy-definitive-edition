@@ -10,6 +10,7 @@ LOCALES_DIR = Path(__file__).parents[1] / "ui" / "i18n"
 # upstream keeps the language selector label in English on purpose.
 ALLOWED_UNTRANSLATED = frozenset({
     "app.name",
+    "bypass.mode_amneziawg",
     "button.test_loading",
     "connectivity.cfworker_title",
     "connectivity.error_line",

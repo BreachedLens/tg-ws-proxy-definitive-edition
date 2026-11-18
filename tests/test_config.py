@@ -52,6 +52,13 @@ class CoerceDomainListTest(unittest.TestCase):
         self.assertEqual(coerce_domain_list(None), [])
         self.assertEqual(coerce_domain_list(42), [])
 
+    def test_cleans_corrupt_legacy_domain_values(self):
+        self.assertEqual(coerce_domain_list("['bad.example', '']"), ["bad.example"])
+        self.assertEqual(
+            coerce_domain_list("['one.example', 'broken']"), ["one.example"]
+        )
+        self.assertEqual(coerce_domain_list("{'domain': 'bad.example'}"), [])
+
 
 class DomainValidationTest(unittest.TestCase):
     def test_accepts_ordinary_domains(self):

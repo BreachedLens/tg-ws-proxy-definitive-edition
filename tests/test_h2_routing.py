@@ -16,7 +16,8 @@ class H2RoutingTest(unittest.IsolatedAsyncioTestCase):
         writer.wait_closed = AsyncMock()
         ws = Mock(send=AsyncMock())
         pool = SimpleNamespace(open=AsyncMock())
-        with patch.object(proxy_config, 'dc_redirects', {2: '149.154.167.51'}), \
+        with patch.object(proxy_config, 'bypass_mode', 'legacy'), \
+                patch.object(proxy_config, 'dc_redirects', {2: '149.154.167.51'}), \
                 patch.object(proxy_config, 'force_test_dc', False), \
                 patch.object(tg_ws_proxy, 'cf_h2_pool', pool), \
                 patch.object(tg_ws_proxy, 'set_sock_opts'), \
@@ -41,7 +42,8 @@ class H2RoutingTest(unittest.IsolatedAsyncioTestCase):
                 reader = Mock()
                 writer = Mock(wait_closed=AsyncMock())
                 writer.get_extra_info.return_value = None
-                with patch.object(proxy_config, 'force_test_dc', forced), \
+                with patch.object(proxy_config, 'bypass_mode', 'legacy'), \
+                        patch.object(proxy_config, 'force_test_dc', forced), \
                         patch.object(tg_ws_proxy, 'set_sock_opts'), \
                         patch.object(tg_ws_proxy, '_read_client_init', AsyncMock(
                             return_value=(b'', reader, writer, 'test'))), \
@@ -82,7 +84,8 @@ class H2RoutingTest(unittest.IsolatedAsyncioTestCase):
                     return run
 
                 pool = SimpleNamespace(open=AsyncMock(side_effect=open_h2))
-                with patch.object(proxy_config, 'fallback_cfproxy', cf), \
+                with patch.object(proxy_config, 'bypass_mode', 'legacy'), \
+                        patch.object(proxy_config, 'fallback_cfproxy', cf), \
                         patch.object(proxy_config, 'cfproxy_worker_domains',
                                      ['worker.example'] if worker else []), \
                         patch.object(bridge, 'bridge_h2', side_effect=route('bridge')), \

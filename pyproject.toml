@@ -53,6 +53,9 @@ dependencies = [
     "Pillow==12.1.0; platform_system == 'Darwin'",
 ]
 
+[project.optional-dependencies]
+build = ["pyinstaller==6.13.0"]
+
 [project.scripts]
 tg-ws-proxy = "proxy.tg_ws_proxy:main"
 tg-ws-proxy-tray-win = "windows:main"

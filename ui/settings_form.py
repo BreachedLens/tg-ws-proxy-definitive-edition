@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import webbrowser
 from dataclasses import dataclass
@@ -7,7 +8,6 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from proxy import __version__, coerce_domain_list
 from proxy.balancer import balancer
-from utils.update_check import RELEASES_PAGE_URL, get_status, run_check
 from ui.background_task import BackgroundTask
 from ui.connectivity import (
     run_cfproxy_multi_test, run_cfproxy_auto_test, run_cfworker_multi_test,
@@ -20,6 +20,7 @@ from ui.ctk_controls import (
 from ui.ctk_theme import CtkTheme
 from ui.ctk_tooltip import attach_ctk_tooltip, attach_tooltip_to_widgets
 from ui.settings import validate_settings
+from ui.bypass_settings import _BypassSettingsMixin
 from ui.i18n import (
     label_from_language, language_from_label, language_option_labels,
     set_language, get_language, t,
@@ -33,7 +34,7 @@ _APPEARANCE_TO_CTK = {"auto": "system", "light": "Light", "dark": "Dark"}
 def _get_doc_url(doc_name: str) -> str:
     lang = get_language().value
     lang_folder = "EN" if lang == "en" else "RU"
-    return f"https://github.com/Flowseal/tg-ws-proxy/blob/main/docs/{lang_folder}/{doc_name}.md"
+    return f"https://github.com/BreachedLens/tg-ws-proxy-definitive-edition/blob/main/docs/{lang_folder}/{doc_name}.md"
 
 
 def _appearance_options() -> List[str]:
@@ -63,7 +64,6 @@ class TrayConfigFormWidgets:
     no_secure_var: Any
     advanced_vars: Dict[str, Any]
     autostart_var: Optional[Any]
-    check_updates_var: Optional[Any]
     cfproxy_var: Optional[Any] = None
     h2_var: Optional[Any] = None
     cfproxy_user_domain_enabled_var: Optional[Any] = None
@@ -72,6 +72,16 @@ class TrayConfigFormWidgets:
     cfproxy_worker_domain_var: Optional[Any] = None
     appearance_var: Optional[Any] = None
     language_var: Optional[Any] = None
+    bypass_mode_var: Optional[Any] = None
+    bypass_amneziawg_config_path_var: Optional[Any] = None
+    bypass_amneziawg_split_tunnel_var: Optional[Any] = None
+    bypass_dns_var: Optional[Any] = None
+    bypass_cdn_provider_var: Optional[Any] = None
+    bypass_cdn_custom_sni_var: Optional[Any] = None
+    bypass_cdn_custom_host_var: Optional[Any] = None
+    bypass_cdn_custom_connect_ip_var: Optional[Any] = None
+    bypass_status_label: Optional[Any] = None
+    bypass_status_listener: Optional[Any] = None
 
 
 def install_tray_config_form(
@@ -83,7 +93,6 @@ def install_tray_config_form(
     *,
     show_autostart: bool = False,
     autostart_value: bool = False,
-    on_update_click: Optional[Callable[[], None]] = None,
 ) -> TrayConfigFormWidgets:
     set_language(cfg.get("language", default_config["language"]))
     no_secure_var = ctk.BooleanVar(master=frame, value=cfg.get("no_secure", False))
@@ -92,23 +101,35 @@ def install_tray_config_form(
     appearance_var, language_var = _create_interface(ctk, frame, theme, cfg, default_config)
     host_var, port_var, secret_var = _create_connection(ctk, frame, theme, cfg, default_config)
     dc_textbox = _create_dc(ctk, frame, theme, cfg, default_config)
-    cfproxy_var, h2_var, cf_custom_cb_var, cfproxy_user_domain_var = _create_cfproxy(
-        ctk, frame, theme, cfg, default_config, no_secure_var,
+    # Legacy Cloudflare routing remains available behind the three-mode Bypass
+    # selector, but its old duplicate controls are intentionally not rendered.
+    cfproxy_var = ctk.BooleanVar(master=frame, value=cfg.get("cfproxy", default_config.get("cfproxy", True)))
+    h2_var = ctk.BooleanVar(master=frame, value=cfg.get("h2", default_config.get("h2", True)))
+    cf_custom_cb_var = ctk.BooleanVar(master=frame, value=cfg.get("cfproxy_user_domain_enabled", False))
+    cfproxy_user_domain_var = ctk.StringVar(
+        master=frame,
+        value=", ".join(coerce_domain_list(cfg.get("cfproxy_user_domain", ""))),
     )
-    cfproxy_worker_enabled_var, cfproxy_worker_domain_var = _create_cfworker(
-        ctk, frame, theme, cfg, default_config, no_secure_var,
+    cfproxy_worker_enabled_var = ctk.BooleanVar(master=frame, value=cfg.get("cfproxy_worker_enabled", False))
+    cfproxy_worker_domain_var = ctk.StringVar(
+        master=frame,
+        value=", ".join(coerce_domain_list(cfg.get("cfproxy_worker_domain", ""))),
     )
+    (
+        bypass_mode_var, bypass_config_path_var, bypass_split_var, bypass_dns_var,
+        bypass_cdn_provider_var, bypass_cdn_sni_var, bypass_cdn_host_var,
+        bypass_cdn_connect_ip_var, bypass_status_label, bypass_status_listener,
+    ) = _create_bypass(ctk, frame, theme, cfg, default_config)
     verbose_var, advanced_vars = _create_logging(
         ctk, frame, theme, cfg, default_config, no_secure_var,
     )
-    check_updates_var = _create_updates(ctk, frame, theme, cfg, default_config, on_update_click)
     autostart_var = _create_autostart(ctk, frame, theme, show_autostart, autostart_value)
 
     return TrayConfigFormWidgets(
         host_var=host_var, port_var=port_var, secret_var=secret_var,
         dc_textbox=dc_textbox, verbose_var=verbose_var, no_secure_var=no_secure_var,
         advanced_vars=advanced_vars,
-        autostart_var=autostart_var, check_updates_var=check_updates_var,
+        autostart_var=autostart_var,
         cfproxy_var=cfproxy_var,
         h2_var=h2_var,
         cfproxy_user_domain_enabled_var=cf_custom_cb_var,
@@ -117,6 +138,16 @@ def install_tray_config_form(
         cfproxy_worker_domain_var=cfproxy_worker_domain_var,
         appearance_var=appearance_var,
         language_var=language_var,
+        bypass_mode_var=bypass_mode_var,
+        bypass_amneziawg_config_path_var=bypass_config_path_var,
+        bypass_amneziawg_split_tunnel_var=bypass_split_var,
+        bypass_dns_var=bypass_dns_var,
+        bypass_cdn_provider_var=bypass_cdn_provider_var,
+        bypass_cdn_custom_sni_var=bypass_cdn_sni_var,
+        bypass_cdn_custom_host_var=bypass_cdn_host_var,
+        bypass_cdn_custom_connect_ip_var=bypass_cdn_connect_ip_var,
+        bypass_status_label=bypass_status_label,
+        bypass_status_listener=bypass_status_listener,
     )
 
 
@@ -133,17 +164,6 @@ def _create_header(ctk, frame, theme):
         font=(theme.ui_font_family, 12),
         text_color=theme.text_secondary, anchor="e",
     ).pack(side="right", padx=(4, 0))
-
-    ctk.CTkButton(
-        header, text=t("button.donate"), width=90, height=28,
-        font=(theme.ui_font_family, 13, "bold"), corner_radius=8,
-        fg_color="#22c55e", hover_color="#16a34a",
-        text_color="#ffffff", border_width=0,
-        command=lambda: (
-            header.winfo_toplevel().iconify(),
-            webbrowser.open(_get_doc_url("Funding")),
-        ),
-    ).pack(side="right", padx=(0, 6))
 
 
 def _create_interface(ctk, frame, theme, cfg, default_config):
@@ -443,6 +463,10 @@ def _create_cfworker(ctk, frame, theme, cfg, default_config, no_secure_var):
     return cfproxy_worker_enabled_var, cfproxy_worker_domain_var
 
 
+_bypass_mode_labels = _BypassSettingsMixin._bypass_mode_labels
+_create_bypass = _BypassSettingsMixin._create_bypass
+
+
 def _create_logging(ctk, frame, theme, cfg, default_config, no_secure_var):
     log_inner = create_config_section(ctk, frame, theme, t("section.logs"))
 
@@ -479,89 +503,6 @@ def _create_logging(ctk, frame, theme, cfg, default_config, no_secure_var):
     return verbose_var, advanced_vars
 
 
-def _create_updates(ctk, frame, theme, cfg, default_config, on_update_click):
-    upd_inner = create_config_section(ctk, frame, theme, t("section.updates"))
-    check_updates_var = ctk.BooleanVar(
-        master=frame, value=bool(cfg.get("check_updates", default_config.get("check_updates", True)))
-    )
-    upd_cb = create_checkbox(ctk, upd_inner, theme, t("label.check_updates"), check_updates_var)
-    upd_cb.pack(anchor="w", pady=(0, 6))
-    attach_ctk_tooltip(upd_cb, t("tip.check_updates"))
-
-    status_label = create_label(ctk, upd_inner, theme, "", size=11,
-                                justify="left", wraplength=_INNER_W)
-    status_label.pack(anchor="w", pady=(0, 8))
-    check_task = BackgroundTask(frame.winfo_toplevel())
-
-    def check():
-        if check_task.running or check_task.closed:
-            return
-        check_button.configure(state="disabled")
-        status_label.configure(text=t("updates.status_checking"))
-        check_task.start(
-            lambda: run_check(__version__), lambda _: refresh(),
-            lambda: check_button.configure(state="normal"),
-        )
-
-    check_button = ctk.CTkButton(
-        upd_inner, text=t("button.check_updates"), height=32,
-        font=(theme.ui_font_family, 13), corner_radius=8,
-        fg_color=theme.tg_blue, hover_color=theme.tg_blue_hover,
-        text_color="#ffffff", command=check,
-    )
-    upd_btn_row = ctk.CTkFrame(upd_inner, fg_color="transparent")
-    upd_btn_row.pack(fill="x")
-    upd_btn_row.grid_columnconfigure(0, weight=1)
-    release_button = ctk.CTkButton(
-        upd_btn_row, text=t("button.open_release"), height=32,
-        font=(theme.ui_font_family, 13), corner_radius=8,
-        fg_color=theme.field_bg, hover_color=theme.field_border,
-        text_color=theme.text_primary, border_width=1,
-        border_color=theme.field_border,
-    )
-    release_button.grid(row=0, column=0, sticky="ew")
-    update_button = ctk.CTkButton(
-        upd_btn_row, text=t("button.update"), height=32,
-        font=(theme.ui_font_family, 13, "bold"), corner_radius=8,
-        fg_color=theme.tg_blue, hover_color=theme.tg_blue_hover,
-        text_color="#ffffff", command=on_update_click,
-    )
-
-    def refresh():
-        st = get_status()
-        if st.get("error"):
-            status = t("updates.status_error")
-        elif not st.get("checked"):
-            status = t("updates.status_pending")
-        elif st.get("has_update") and st.get("latest"):
-            status = t("updates.status_available", latest=st["latest"], current=__version__)
-        elif st.get("ahead_of_release") and st.get("latest"):
-            status = t("updates.status_ahead", current=__version__, latest=st["latest"])
-        else:
-            status = t("updates.status_latest")
-        status_label.configure(text=status)
-        rel_url = (st.get("html_url") or "").strip() or RELEASES_PAGE_URL
-        release_button.configure(command=lambda: webbrowser.open(rel_url))
-        can_update = bool(st.get("has_update") and on_update_click is not None)
-        upd_btn_row.grid_columnconfigure(1, weight=int(can_update))
-        release_button.grid_configure(padx=(0, 4) if can_update else 0)
-        if can_update:
-            update_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        else:
-            update_button.grid_remove()
-
-    def sync_manual_check(*_):
-        if check_updates_var.get():
-            check_button.pack_forget()
-        else:
-            check_button.pack(fill="x", pady=(0, 8), before=upd_btn_row)
-
-    check_updates_var.trace_add("write", sync_manual_check)
-    sync_manual_check()
-    refresh()
-    return check_updates_var
-
-
 def _create_autostart(ctk, frame, theme, show_autostart, autostart_value):
     autostart_var = None
     if show_autostart:
@@ -595,7 +536,7 @@ def validate_config_form(
     for key, var in widgets.advanced_vars.items():
         values[key] = var.get()
     for key in (
-        "check_updates", "cfproxy", "h2", "cfproxy_user_domain_enabled",
+        "cfproxy", "h2", "cfproxy_user_domain_enabled",
         "cfproxy_worker_enabled", "no_secure",
     ):
         var = getattr(widgets, f"{key}_var")
@@ -614,6 +555,60 @@ def validate_config_form(
         values["appearance"] = _appearance_to_cfg(widgets.appearance_var.get())
     if widgets.language_var is not None:
         values["language"] = language_from_label(widgets.language_var.get()).value
+    if widgets.bypass_mode_var is not None:
+        labels = _bypass_mode_labels()
+        mode = next(
+            (key for key, label in labels.items() if label == widgets.bypass_mode_var.get()),
+            None,
+        )
+        if mode is None:
+            return t("validation.bad_bypass_mode")
+        values["bypass_mode"] = mode
+    if widgets.bypass_amneziawg_config_path_var is not None:
+        values["bypass_amneziawg_config_path"] = (
+            widgets.bypass_amneziawg_config_path_var.get().strip()
+        )
+    if widgets.bypass_amneziawg_split_tunnel_var is not None:
+        values["bypass_amneziawg_split_tunnel"] = bool(
+            widgets.bypass_amneziawg_split_tunnel_var.get()
+        )
+    if widgets.bypass_dns_var is not None:
+        dns = [item.strip() for item in widgets.bypass_dns_var.get().split(",") if item.strip()]
+        try:
+            dns = [str(ipaddress.ip_address(item)) for item in dns]
+        except ValueError:
+            return t("validation.bad_bypass_dns")
+        values["bypass_dns"] = dns
+    if widgets.bypass_cdn_provider_var is not None:
+        from bypass.cdn import CDN_PROVIDER_IDS
+        provider_names = {
+            provider: t("bypass.provider_google" if provider == "google-gfe"
+                        else "bypass.provider_" + provider)
+            for provider in CDN_PROVIDER_IDS
+        }
+        provider = next((key for key, label in provider_names.items()
+                         if label == widgets.bypass_cdn_provider_var.get()), None)
+        if provider is None:
+            return t("validation.bad_cdn_provider")
+        values["bypass_cdn_provider"] = provider
+    if widgets.bypass_cdn_custom_sni_var is not None:
+        values["bypass_cdn_custom_sni"] = widgets.bypass_cdn_custom_sni_var.get().strip()
+    if widgets.bypass_cdn_custom_host_var is not None:
+        values["bypass_cdn_custom_host"] = widgets.bypass_cdn_custom_host_var.get().strip()
+    if widgets.bypass_cdn_custom_connect_ip_var is not None:
+        value = widgets.bypass_cdn_custom_connect_ip_var.get().strip()
+        if value:
+            try:
+                value = str(ipaddress.ip_address(value))
+            except ValueError:
+                return t("validation.bad_cdn_connect_ip")
+        values["bypass_cdn_custom_connect_ip"] = value
+    values.setdefault("bypass_cdn_provider", default_config.get("bypass_cdn_provider", "google-gfe"))
+    values.setdefault("bypass_cdn_custom_sni", default_config.get("bypass_cdn_custom_sni", ""))
+    values.setdefault("bypass_cdn_custom_host", default_config.get("bypass_cdn_custom_host", ""))
+    values.setdefault("bypass_cdn_custom_connect_ip", default_config.get("bypass_cdn_custom_connect_ip", ""))
+    values.setdefault("bypass_amneziawg_split_tunnel",
+                       default_config.get("bypass_amneziawg_split_tunnel", True))
     return validate_settings(values, default_config)
 
 

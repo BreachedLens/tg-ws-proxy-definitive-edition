@@ -365,41 +365,5 @@ class RelaunchEnvTest(unittest.TestCase):
         self.assertEqual(out, env)
 
 
-class RestartAfterUpdateTest(unittest.TestCase):
-    def test_restart_releases_resources_before_launch_and_preserves_arguments(self):
-        with mock.patch.dict(sys.modules, {'pystray': mock.Mock()}):
-            import linux
-
-        events = []
-        exe = str(Path(tempfile.gettempdir()) / 'proxy')
-        with mock.patch.object(linux, 'stop_proxy', side_effect=lambda: events.append('stop')), \
-                mock.patch.object(linux, 'release_lock', side_effect=lambda: events.append('unlock')), \
-                mock.patch.object(linux_update, 'exe_path', return_value=Path(exe)), \
-                mock.patch.object(linux, 'relaunch_env', return_value={'PATH': '/usr/bin'}), \
-                mock.patch.object(sys, 'argv', ['proxy', '--portable']), \
-                mock.patch.object(linux.subprocess, 'Popen', side_effect=lambda *a, **k: events.append('launch')) as launch, \
-                mock.patch.object(linux.os, '_exit', side_effect=lambda code: events.append('exit')):
-            linux._restart_after_update()
-        self.assertEqual(events, ['stop', 'unlock', 'launch', 'exit'])
-        self.assertEqual(launch.call_args[0][0], [exe, '--portable'])
-        self.assertEqual(launch.call_args[1]['env'], {'PATH': '/usr/bin'})
-
-    def test_launch_failure_recovers_the_running_proxy_instead_of_exiting(self):
-        with mock.patch.dict(sys.modules, {'pystray': mock.Mock()}):
-            import linux
-
-        with ExitStack() as stack:
-            mocks = {name: stack.enter_context(mock.patch.object(linux, name)) for name in (
-                'stop_proxy', 'release_lock', 'acquire_lock', 'start_proxy', '_show_error',
-            )}
-            exit_process = stack.enter_context(mock.patch.object(linux.os, '_exit'))
-            stack.enter_context(mock.patch.object(linux.subprocess, 'Popen', side_effect=OSError('launch failed')))
-            linux._restart_after_update()
-        mocks['acquire_lock'].assert_called_once_with()
-        mocks['start_proxy'].assert_called_once_with(linux._config, mocks['_show_error'])
-        mocks['_show_error'].assert_called_once()
-        exit_process.assert_not_called()
-
-
 if __name__ == '__main__':
     unittest.main()

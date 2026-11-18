@@ -243,7 +243,8 @@ class ProxySelfPipeTest(unittest.IsolatedAsyncioTestCase):
         from proxy import tg_ws_proxy
         from proxy.config import ProxyConfig
 
-        config = ProxyConfig(port=0, dc_redirects={}, pool_size=0, cfproxy_h2_media=False)
+        config = ProxyConfig(port=0, dc_redirects={}, pool_size=0,
+                             cfproxy_h2_media=False, bypass_mode='legacy')
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         with patch.object(tg_ws_proxy, 'proxy_config', config), \

@@ -1,3 +1,4 @@
+import ast
 import logging
 import os
 import string
@@ -15,7 +16,7 @@ from .utils import build_github_opener
 log = logging.getLogger('tg-mtproto-proxy')
 
 CFPROXY_DOMAINS_URL = (
-    "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main"
+    "https://raw.githubusercontent.com/BreachedLens/tg-ws-proxy-definitive-edition/main"
     "/.github/cfproxy-domains.txt"
 )
 
@@ -75,15 +76,20 @@ class ProxyConfig:
     fake_tls_domain: str = ''
     proxy_protocol: bool = False
     force_test_dc: bool = False
-    bypass_mode: str = "auto"
+    bypass_mode: str = "alt_cdn"
     bypass_cdn_enabled: bool = True
     bypass_cdn_providers: List[Dict[str, object]] = field(default_factory=list)
-    bypass_amneziawg_enabled: bool = True
-    bypass_amneziawg_config_path: str = r"C:\Users\Jacob\Downloads\WARP4813665.conf"
+    bypass_amneziawg_enabled: bool = False
+    bypass_amneziawg_config_path: str = ""
     bypass_amneziawg_binary_path: str = ""
     bypass_amneziawg_manage_dns: bool = True
     bypass_amneziawg_network_interface: str = ""
-    bypass_dns: List[str] = field(default_factory=lambda: ["9.9.9.9", "149.112.112.112"])
+    bypass_amneziawg_split_tunnel: bool = True
+    bypass_dns: List[str] = field(default_factory=list)
+    bypass_cdn_provider: str = "google-gfe"
+    bypass_cdn_custom_sni: str = ""
+    bypass_cdn_custom_host: str = ""
+    bypass_cdn_custom_connect_ip: str = ""
 
     @property
     def h2_enabled(self) -> bool:
@@ -95,26 +101,40 @@ proxy_config = ProxyConfig()
 
 
 def coerce_domain_list(value) -> List[str]:
-    if isinstance(value, str):
-        items = value.replace(',', ' ').replace(';', ' ').split()
-    elif isinstance(value, (list, tuple)):
-        items: List[str] = []
-        for entry in value:
-            if isinstance(entry, str):
-                items.extend(entry.replace(',', ' ').replace(';', ' ').split())
-    else:
-        return []
-    seen = set()
-    result: List[str] = []
-    for item in items:
+    def _tokens(item, depth=0):
+        if depth > 6:
+            return []
+        if isinstance(item, (list, tuple)):
+            return [token for entry in item for token in _tokens(entry, depth + 1)]
+        if not isinstance(item, str):
+            return []
+
         item = item.strip()
         if not item:
+            return []
+        if item[0] in "[({'\"":
+            # Older UI code persisted Python representations of malformed lists.
+
+            try:
+                decoded = ast.literal_eval(item)
+            except (SyntaxError, ValueError):
+                # Corrupt repr-like strings used to be split into bogus hostnames.
+                return []
+            if isinstance(decoded, (str, list, tuple)):
+                return _tokens(decoded, depth + 1)
+            return []
+        return item.replace(',', ' ').replace(';', ' ').split()
+
+    seen = set()
+    result: List[str] = []
+    for item in _tokens(value):
+        item = item.strip()
+        if not item or not _is_valid_domain(item):
             continue
         key = item.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
     return result
 
 

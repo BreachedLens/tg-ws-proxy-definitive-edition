@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from copy import deepcopy
 
 from tkinter import messagebox
@@ -44,6 +43,13 @@ class SettingsDialog:
 
     def _finish(self):
         self.closed = True
+        listener = getattr(self.widgets, "bypass_status_listener", None)
+        if listener is not None:
+            try:
+                from proxy.route_status import remove_route_listener
+                remove_route_listener(listener)
+            except Exception:
+                pass
         self.finish()
 
     def save(self):
@@ -82,7 +88,4 @@ class SettingsDialog:
         )
         self._finish()
         if do_restart:
-            threading.Thread(
-                target=self.restart, args=(deepcopy(change.config),),
-                daemon=True, name="proxy-restart",
-            ).start()
+            self.restart(deepcopy(change.config))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import math
 import socket
 from copy import deepcopy
@@ -10,7 +11,7 @@ from proxy import coerce_domain_list, parse_dc_ip_list
 from ui.i18n import t
 
 UI_ONLY_KEYS = frozenset({
-    "appearance", "autostart", "check_updates", "language"
+    "appearance", "autostart", "language"
 })
 
 
@@ -80,5 +81,23 @@ def validate_settings(values: dict, defaults: dict) -> Union[dict, str]:
     for key in ("cfproxy_user_domain", "cfproxy_worker_domain"):
         if key in config:
             config[key] = coerce_domain_list(config[key])
+
+    if config.get("bypass_cdn_provider") not in (
+            "google-gfe", "fastly", "cloudflare", "akamai", "cloudfront",
+            "bunny", "gcore", "vercel", "custom"):
+        return t("validation.bad_cdn_provider")
+    if (config.get("bypass_mode") == "alt_cdn"
+            and config.get("bypass_cdn_provider") == "custom"
+            and not config.get("bypass_cdn_custom_sni", "").strip()):
+        return t("validation.bad_custom_sni")
+    connect_ip = config.get("bypass_cdn_custom_connect_ip", "")
+    if connect_ip:
+        try:
+            config["bypass_cdn_custom_connect_ip"] = str(ipaddress.ip_address(connect_ip))
+        except ValueError:
+            return t("validation.bad_cdn_connect_ip")
+    for key in ("bypass_amneziawg_split_tunnel",):
+        if key in config:
+            config[key] = bool(config[key])
 
     return config

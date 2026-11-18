@@ -96,13 +96,35 @@ class AmneziaConfigTest(unittest.TestCase):
         self.assertEqual(cfg.peer.keepalive, 25)
         self.assertFalse(cfg.validate())
 
-    def test_validate_missing_obfuscation_fields(self):
-        broken = VALID_PROFILE.replace(
-            "H1 = 1234567891\n", ""
-        ).replace("H4 = 1234567894\n", "")
-        cfg = AmneziaConfig.parse(broken)
-        errors = cfg.validate()
-        self.assertTrue(any("obfuscation incomplete" in e for e in errors))
+    def test_validate_accepts_partial_obfuscation_parameters(self):
+        profile = VALID_PROFILE
+        for line in (
+            "Jmax = 70\n", "S1 = 86\n", "S2 = 142\n",
+            "H1 = 1234567891\n", "H2 = 1234567892\n",
+            "H3 = 1234567893\n", "H4 = 1234567894\n",
+        ):
+            profile = profile.replace(line, "")
+        cfg = AmneziaConfig.parse(profile)
+        self.assertEqual(cfg.interface.obfuscation, {"Jc": 4, "Jmin": 40})
+        self.assertFalse(cfg.validate())
+
+    def test_validate_accepts_wireguard_profile_without_obfuscation(self):
+        profile = VALID_PROFILE
+        for line in (
+            "Jc = 4\n", "Jmin = 40\n", "Jmax = 70\n",
+            "S1 = 86\n", "S2 = 142\n", "H1 = 1234567891\n",
+            "H2 = 1234567892\n", "H3 = 1234567893\n",
+            "H4 = 1234567894\n",
+        ):
+            profile = profile.replace(line, "")
+        cfg = AmneziaConfig.parse(profile)
+        self.assertFalse(cfg.interface.obfuscation)
+        self.assertFalse(cfg.validate())
+
+    def test_validate_accepts_zero_s_values(self):
+        profile = VALID_PROFILE.replace("S1 = 86", "S1 = 0").replace("S2 = 142", "S2 = 0")
+        cfg = AmneziaConfig.parse(profile)
+        self.assertFalse(cfg.validate())
 
     def test_validate_bad_private_key(self):
         broken = VALID_PROFILE.replace(
@@ -137,7 +159,9 @@ class AmneziaConfigTest(unittest.TestCase):
 
     def test_validate_rejects_malformed_numeric_obfuscation_value(self):
         profile = VALID_PROFILE.replace("Jc = 4", "Jc = invalid")
-        errors = AmneziaConfig.parse(profile).validate()
+        parsed = AmneziaConfig.parse(profile)
+        self.assertNotIn("Jc", parsed.interface.obfuscation)
+        errors = parsed.validate()
         self.assertTrue(any("Interface/Jc" in e for e in errors))
 
     def test_validate_rejects_out_of_range_mtu(self):
@@ -145,15 +169,39 @@ class AmneziaConfigTest(unittest.TestCase):
         errors = AmneziaConfig.parse(profile).validate()
         self.assertTrue(any("Interface/MTU" in e for e in errors))
 
-    def test_render_replaces_dns_with_quad9(self):
+    def test_render_preserves_profile_dns_when_override_is_blank(self):
+        cfg = AmneziaConfig.parse(VALID_PROFILE)
+        rendered = cfg.render()
+        self.assertIn("DNS = 1.1.1.1", rendered)
+        reparsed = AmneziaConfig.parse(rendered)
+        self.assertEqual(reparsed.interface.dns, ["1.1.1.1"])
+
+    def test_render_applies_dns_override(self):
         cfg = AmneziaConfig.parse(VALID_PROFILE)
         rendered = cfg.render(dns=QUAD9_IPV4)
         self.assertIn("DNS = 9.9.9.9, 149.112.112.112", rendered)
         self.assertIn("Endpoint = 203.0.113.7:51820", rendered)
         self.assertIn("Jc = 4", rendered)
-        # round-trip stability: re-parsing the render yields the same object
         reparsed = AmneziaConfig.parse(rendered)
         self.assertEqual(reparsed.interface.dns, list(QUAD9_IPV4))
+
+    def test_split_tunnel_keeps_telegram_and_dns_routes_only(self):
+        cfg = AmneziaConfig.parse(VALID_PROFILE)
+        rendered = cfg.render(split_tunnel=True)
+        peer = AmneziaConfig.parse(rendered).peer
+        self.assertEqual(peer.allowed_ips, [
+            *amneziawg_mod.TELEGRAM_SPLIT_NETWORKS, "1.1.1.1/32",
+        ])
+        self.assertNotIn("0.0.0.0/0", peer.allowed_ips)
+        self.assertNotIn("::/0", peer.allowed_ips)
+        self.assertIn("2001:b28:f23d::/48", peer.allowed_ips)
+
+    def test_split_tunnel_adds_ipv4_and_ipv6_dns_host_routes(self):
+        cfg = AmneziaConfig.parse(VALID_PROFILE)
+        rendered = cfg.render(dns=("8.8.8.8", "2001:4860:4860::8888"), split_tunnel=True)
+        peer = AmneziaConfig.parse(rendered).peer
+        self.assertIn("8.8.8.8/32", peer.allowed_ips)
+        self.assertIn("2001:4860:4860::8888/128", peer.allowed_ips)
 
 
 class FrontingProviderTest(unittest.TestCase):
@@ -175,16 +223,55 @@ class FrontingProviderTest(unittest.TestCase):
             FrontingProvider.from_dict({"name": "x", "sni": "y", "bogus": 1})
 
     def test_builtin_providers_present(self):
-        self.assertIn("fastly", BUILTIN_PROVIDERS)
-        self.assertIn("google-gfe", BUILTIN_PROVIDERS)
+        self.assertTrue({
+            "fastly", "google-gfe", "akamai", "cloudfront", "bunny", "gcore", "vercel",
+        }.issubset(BUILTIN_PROVIDERS))
 
 
 class CdnTransportTest(unittest.TestCase):
-    def test_default_rotation_order(self):
+    def test_default_rotation_includes_all_builtin_fronting_providers(self):
         transport = CdnFrontingTransport()
-        self.assertEqual(transport.current_provider.name, "fastly")
-        transport.rotate()
         self.assertEqual(transport.current_provider.name, "google-gfe")
+        self.assertEqual(
+            [provider.name for provider in transport.providers],
+            ["google-gfe", "fastly", "akamai", "cloudfront", "bunny", "gcore", "vercel"],
+        )
+        transport.rotate()
+        self.assertEqual(transport.current_provider.name, "fastly")
+
+    def test_selected_builtin_and_custom_cdn_provider(self):
+        for provider_name in ("google-gfe", "fastly", "akamai", "cloudfront", "bunny", "gcore", "vercel"):
+            with self.subTest(provider=provider_name):
+                manager = build_default_manager(BypassConfig(
+                    mode="alt_cdn", cdn_provider=provider_name,
+                ))
+                self.assertEqual(
+                    manager.get("cdn-fronting").current_provider.name, provider_name
+                )
+        fastly_manager = build_default_manager(BypassConfig(mode="alt_cdn", cdn_provider="fastly"))
+        self.assertEqual(fastly_manager.get("cdn-fronting").current_provider.name, "fastly")
+        google_manager = build_default_manager(BypassConfig(mode="alt_cdn", cdn_provider="google-gfe"))
+        self.assertEqual(google_manager.get("cdn-fronting").current_provider.name, "google-gfe")
+        custom_manager = build_default_manager(BypassConfig(
+            mode="alt_cdn", cdn_provider="custom", cdn_custom_sni="edge.example.com",
+            cdn_custom_host="telegram.example.com",
+        ))
+        provider = custom_manager.get("cdn-fronting").current_provider
+        self.assertEqual(provider.sni, "edge.example.com")
+        self.assertEqual(provider.host_header, "telegram.example.com")
+
+    def test_cloudflare_uses_native_fallback_instead_of_fronting_transport(self):
+        manager = build_default_manager(BypassConfig(mode="alt_cdn", cdn_provider="cloudflare"))
+        self.assertIsNone(manager.get("cdn-fronting"))
+
+    def test_custom_provider_accepts_connect_ip(self):
+        manager = build_default_manager(BypassConfig(
+            mode="alt_cdn", cdn_provider="custom", cdn_custom_sni="edge.example.com",
+            cdn_custom_connect_ip="192.0.2.44",
+        ))
+        self.assertEqual(
+            manager.get("cdn-fronting").current_provider.connect_ip, "192.0.2.44"
+        )
 
     def test_not_configured_without_providers(self):
         transport = CdnFrontingTransport(providers=[])
@@ -194,7 +281,7 @@ class CdnTransportTest(unittest.TestCase):
         transport = CdnFrontingTransport()
         kwargs = transport.websocket_connect_kwargs("149.154.167.220", path="/api")
         self.assertEqual(kwargs["path"], "/api")
-        self.assertEqual(kwargs["target_ip"], "www.fastly.com")
+        self.assertEqual(kwargs["target_ip"], "www.gstatic.com")
         self.assertIn("domain", kwargs)
         self.assertIn("sni", kwargs)
 
@@ -359,28 +446,179 @@ class AmneziaWGTransportTest(unittest.TestCase):
 
         async def exercise():
             with mock.patch.object(amneziawg_mod.sys, "platform", "win32"), mock.patch.object(
+                amneziawg_mod, "_install_windows_tunnel_service", return_value=(True, "")
+            ) as install_service, mock.patch.object(
                 amneziawg_mod, "_run_quiet", return_value=True
             ) as run_quiet, mock.patch.object(
-                transport, "_windows_service_running", return_value=True
+                transport, "_windows_service_state", return_value=("RUNNING", "STATE: 4 RUNNING")
+            ), mock.patch.object(
+                transport, "_windows_service_exists", return_value=False
+            ), mock.patch.object(
+                transport, "_windows_adapter_is_up", side_effect=[True, False]
             ):
+
                 await transport.start()
                 conf_file = transport._conf_file
                 self.assertTrue(os.path.isfile(conf_file))
                 with open(conf_file, "r", encoding="utf-8") as fh:
                     rendered = fh.read()
-                self.assertIn("DNS = 9.9.9.9, 149.112.112.112", rendered)
+                self.assertIn("DNS = 1.1.1.1", rendered)
+                self.assertIn("149.154.160.0/20", rendered)
                 self.assertTrue(transport._service_installed)
                 self.assertEqual(transport._service_name(), "awg-tgproxy")
                 await transport.stop()
 
+            install_service.assert_called_once_with(
+                [binary, "/installtunnelservice", conf_file], return_output=True,
+            )
             self.assertEqual(run_quiet.call_args_list[0].args[0], [
-                binary, "/installtunnelservice", conf_file,
-            ])
-            self.assertEqual(run_quiet.call_args_list[1].args[0], [
                 binary, "/uninstalltunnelservice", "awg-tgproxy",
             ])
             self.assertFalse(os.path.exists(conf_file))
             self.assertFalse(transport._service_installed)
+
+        asyncio.run(exercise())
+
+    def test_windows_adapter_wait_uses_15_seconds_and_300ms_interval(self):
+        transport = self._transport()
+        transport.ADAPTER_READY_TIMEOUT = 15.0
+
+        async def exercise():
+            with mock.patch.object(amneziawg_mod.sys, "platform", "win32"), mock.patch.object(
+                transport, "_windows_service_state", return_value=("RUNNING", "RUNNING")
+            ), mock.patch.object(
+                transport, "_windows_adapter_is_up", return_value=False
+            ), mock.patch.object(
+                amneziawg_mod.time, "monotonic", side_effect=[0.0, 0.0, 15.0]
+            ), mock.patch.object(amneziawg_mod.asyncio, "sleep", new_callable=mock.AsyncMock) as sleep:
+                with self.assertRaises(BypassUnavailable) as caught:
+                    await transport._wait_windows_adapter()
+            sleep.assert_awaited_once_with(0.3)
+            self.assertIn("15s", str(caught.exception))
+
+        asyncio.run(exercise())
+
+    def test_existing_running_service_with_unchanged_profile_is_reused(self):
+        binary = os.path.join(self.tmpdir.name, "amneziawg.exe")
+        with open(binary, "wb") as fh:
+            fh.write(b"test binary placeholder")
+        transport = self._transport(binary_path=binary, manage_dns=False)
+        profile = transport.load_config()
+        rendered = profile.render(dns=transport.dns, split_tunnel=transport.split_tunnel)
+        signature = amneziawg_mod.hashlib.sha256(
+            (os.path.abspath(binary) + "\\0" + rendered).encode("utf-8")
+        ).hexdigest()
+        service_name = "awg-tgproxy"
+        with amneziawg_mod._WINDOWS_SERVICE_CONFIGS_LOCK:
+            amneziawg_mod._WINDOWS_SERVICE_CONFIGS[service_name] = signature
+        self.addCleanup(
+            lambda: amneziawg_mod._WINDOWS_SERVICE_CONFIGS.pop(service_name, None)
+        )
+
+        async def exercise():
+            with mock.patch.object(amneziawg_mod.sys, "platform", "win32"), mock.patch.object(
+                amneziawg_mod, "_install_windows_tunnel_service"
+            ) as install_service, mock.patch.object(
+                amneziawg_mod, "_run_quiet"
+            ) as run_quiet, mock.patch.object(
+                transport, "_windows_service_state", return_value=("RUNNING", "STATE: 4 RUNNING")
+            ), mock.patch.object(
+                transport, "_windows_adapter_is_up", return_value=True
+            ), mock.patch.object(
+                transport, "_wait_windows_service_removed", new=mock.AsyncMock(return_value=True)
+            ):
+                await transport.start()
+                self.assertTrue(transport._service_reused)
+                self.assertTrue(transport._service_installed)
+                await transport.stop()
+            install_service.assert_not_called()
+            run_quiet.assert_not_called()
+
+        asyncio.run(exercise())
+
+    def test_existing_service_removed_before_install(self):
+        binary = os.path.join(self.tmpdir.name, "amneziawg.exe")
+        with open(binary, "wb") as fh:
+            fh.write(b"test binary placeholder")
+        transport = self._transport(binary_path=binary, manage_dns=False)
+        events = []
+
+        async def exercise():
+            async def removed(timeout):
+                events.append("wait-remove")
+                return True
+
+            def install(cmd, *, return_output=False):
+                events.append("install")
+                return True, ""
+
+            with mock.patch.object(amneziawg_mod.sys, "platform", "win32"), mock.patch.object(
+                transport, "_windows_service_state", side_effect=[("STOPPED", "stopped"), ("RUNNING", "running")]
+            ), mock.patch.object(
+                transport, "_windows_service_exists", side_effect=[True, False, False]
+            ), mock.patch.object(
+                transport, "_windows_adapter_is_up", return_value=True
+            ), mock.patch.object(
+                transport, "_wait_windows_service_removed", new=mock.AsyncMock(return_value=True)
+            ), mock.patch.object(
+                transport, "_wait_windows_service", new=mock.AsyncMock()
+            ), mock.patch.object(
+                transport, "_wait_windows_adapter", new=mock.AsyncMock()
+            ), mock.patch.object(
+                transport, "_remove_windows_service", new=mock.AsyncMock(side_effect=lambda _binary: events.append("uninstall"))
+            ), mock.patch.object(
+                amneziawg_mod, "_install_windows_tunnel_service", side_effect=install
+            ):
+                await transport.start()
+                await transport.stop()
+            self.assertEqual(events[:2], ["uninstall", "install"])
+
+        asyncio.run(exercise())
+
+    def test_install_already_running_retries_after_uninstall(self):
+        binary = os.path.join(self.tmpdir.name, "amneziawg.exe")
+        with open(binary, "wb") as fh:
+            fh.write(b"test binary placeholder")
+        transport = self._transport(binary_path=binary, manage_dns=False)
+        install_results = [(False, "Tunnel already installed and running"), (True, "")]
+        installed = []
+
+        async def exercise():
+            with mock.patch.object(amneziawg_mod.sys, "platform", "win32"), mock.patch.object(
+                transport, "_windows_service_state", return_value=("STOPPED", "stopped")
+            ), mock.patch.object(
+                transport, "_windows_service_exists", side_effect=[False, False]
+            ), mock.patch.object(
+                transport, "_windows_adapter_is_up", return_value=False
+            ), mock.patch.object(
+                transport, "_wait_windows_service", new=mock.AsyncMock()
+            ), mock.patch.object(
+                transport, "_wait_windows_adapter", new=mock.AsyncMock()
+            ), mock.patch.object(
+                transport, "_remove_windows_service", new=mock.AsyncMock()
+            ) as remove_service, mock.patch.object(
+                amneziawg_mod, "_install_windows_tunnel_service", side_effect=lambda *args, **kwargs: install_results.pop(0)
+            ) as install_service:
+                await transport.start()
+                # Avoid a second service-uninstall call during stop; this test
+                # asserts the replacement sequence during start only.
+                transport._service_installed = False
+                await transport.stop()
+            self.assertEqual(install_service.call_count, 2)
+            remove_service.assert_awaited_once_with(binary)
+
+        asyncio.run(exercise())
+
+    def test_windows_adapter_wait_reports_stopped_service(self):
+        transport = self._transport()
+
+        async def exercise():
+            with mock.patch.object(amneziawg_mod.sys, "platform", "win32"), mock.patch.object(
+                transport, "_windows_service_state", return_value=("STOPPED", "STATE: 1 STOPPED")
+            ), mock.patch.object(transport, "_log_windows_service_failure") as diagnostic:
+                with self.assertRaisesRegex(BypassUnavailable, "stopped before adapter"):
+                    await transport._wait_windows_adapter()
+            diagnostic.assert_called_once_with("STATE: 1 STOPPED")
 
         asyncio.run(exercise())
 
@@ -390,30 +628,38 @@ class AmneziaWGTransportTest(unittest.TestCase):
         if found is not None:  # on POSIX this path may not exist
             self.assertEqual(found[1], "quick")
 
-    def test_rendered_conf_contains_quad9_dns(self):
+    def test_rendered_conf_preserves_dns_and_uses_split_routes(self):
         transport = self._transport()
         profile = transport.load_config()
-        rendered = profile.render(dns=transport.dns)
-        self.assertIn("DNS = 9.9.9.9, 149.112.112.112", rendered)
+        rendered = profile.render(dns=transport.dns, split_tunnel=transport.split_tunnel)
+        self.assertIn("DNS = 1.1.1.1", rendered)
+        self.assertIn("149.154.160.0/20", rendered)
+        self.assertIn("1.1.1.1/32", rendered)
 
 
 class BuildManagerTest(unittest.TestCase):
-    def test_default_manager_registers_cdn_only(self):
-        manager = build_default_manager(BypassConfig())
+    def test_default_manager_uses_google_fronting_provider(self):
+        cfg = BypassConfig()
+        self.assertEqual(cfg.cdn_provider, "google-gfe")
+        manager = build_default_manager(cfg)
         self.assertEqual(
-            [t.name for t in manager.transports], ["cdn-fronting"]
+            manager.get("cdn-fronting").current_provider.name, "google-gfe"
         )
 
     def test_amneziawg_registered_when_enabled(self):
         path = _write_profile(VALID_PROFILE)
-        cfg = BypassConfig(amneziawg_enabled=True, amneziawg_config_path=path)
+        cfg = BypassConfig(
+            amneziawg_enabled=True, amneziawg_config_path=path,
+            cdn_enabled=False, mode="amneziawg", cdn_provider="google-gfe",
+        )
         with mock.patch.object(amneziawg_mod, "_which", return_value="/usr/bin/amneziawg-go"):
             manager = build_default_manager(cfg)
         self.assertEqual(
-            [t.name for t in manager.transports], ["cdn-fronting", "amneziawg"]
+            [t.name for t in manager.transports], ["amneziawg"]
         )
         transport = manager.get("amneziawg")
-        self.assertEqual(transport.dns, QUAD9_IPV4)
+        self.assertIsNone(transport.dns)
+        self.assertTrue(transport.split_tunnel)
 
     def test_config_from_mapping_ignores_unknown_keys(self):
         cfg = BypassConfig.from_mapping({"cdn_enabled": False, "unknown": 1})

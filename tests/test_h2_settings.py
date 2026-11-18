@@ -85,7 +85,8 @@ class H2ServerLifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_stop_and_cancellation_close_default_h2_and_listener_tasks(self):
         for cancel in (False, True):
             with self.subTest(cancel=cancel):
-                config = ProxyConfig(port=0, dc_redirects={}, pool_size=0)
+                config = ProxyConfig(port=0, dc_redirects={}, pool_size=0,
+                                     bypass_mode='legacy')
                 stop = asyncio.Event()
                 before = asyncio.all_tasks()
                 with patch.object(tg_ws_proxy, 'proxy_config', config), \

@@ -592,7 +592,8 @@ class H2WireTest(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(tg_ws_proxy, 'cf_h2_pool', pool), \
                     patch.object(tg_ws_proxy.ws_pool, 'get', AsyncMock(return_value=None)) as direct, \
-                    patch.multiple(proxy_config, fallback_cfproxy=True, cfproxy_worker_domains=[],
+                    patch.multiple(proxy_config, bypass_mode='legacy',
+                                   fallback_cfproxy=True, cfproxy_worker_domains=[],
                                    force_test_dc=False, fake_tls_domain='', proxy_protocol=False):
                 for tag in (PROTO_TAG_ABRIDGED, PROTO_TAG_INTERMEDIATE, PROTO_TAG_SECURE):
                     with self.subTest(tag=tag.hex()):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import tkinter
 from dataclasses import dataclass
@@ -45,6 +46,13 @@ class CtkTheme:
     mono_font_family: str = "Monospace"
 
 
+def _report_ui_exception(exc, value, traceback) -> None:
+    logging.getLogger("tg-ws-tray").error(
+        "Settings dialog failed: unhandled UI callback exception",
+        exc_info=(exc, value, traceback),
+    )
+
+
 def ctk_theme_for_platform() -> CtkTheme:
     if sys.platform == "win32":
         return CtkTheme(ui_font_family="Segoe UI", mono_font_family="Consolas")
@@ -75,6 +83,7 @@ def create_ctk_toplevel(
     after_create: Optional[Callable[[Any], None]] = None,
 ) -> Any:
     root = ctk.CTkToplevel()
+    root.report_callback_exception = _report_ui_exception
 
     if sys.platform == "win32":
         def handle_ctrl_shortcut(event: Any) -> Optional[str]:
