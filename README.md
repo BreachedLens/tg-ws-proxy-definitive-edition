@@ -56,3 +56,7 @@ If Telegram cannot connect, check the configured DC addresses and selected CDN i
 ## Documentation
 
 See the [full project README](docs/README.md), [Windows packaging spec](packaging/windows.spec), [build workflow](.github/workflows/build.yml), and [MIT license](LICENSE).
+
+## Credits
+
+* **[Flowseal](https://github.com/Flowseal)** — creator of the original **[tg-ws-proxy](https://github.com/tg-ws-proxy)** project, MTProto WebSocket bridge core, and desktop tray/UI foundation on which this edition is built.
