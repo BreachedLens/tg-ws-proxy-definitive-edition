@@ -6,7 +6,7 @@ import webbrowser
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from proxy import __version__, coerce_domain_list
+from proxy import coerce_domain_list
 from proxy.balancer import balancer
 from ui.background_task import BackgroundTask
 from ui.connectivity import (
@@ -73,9 +73,6 @@ class TrayConfigFormWidgets:
     appearance_var: Optional[Any] = None
     language_var: Optional[Any] = None
     bypass_mode_var: Optional[Any] = None
-    bypass_amneziawg_config_path_var: Optional[Any] = None
-    bypass_amneziawg_split_tunnel_var: Optional[Any] = None
-    bypass_dns_var: Optional[Any] = None
     bypass_cdn_provider_var: Optional[Any] = None
     bypass_cdn_custom_sni_var: Optional[Any] = None
     bypass_cdn_custom_host_var: Optional[Any] = None
@@ -101,8 +98,8 @@ def install_tray_config_form(
     appearance_var, language_var = _create_interface(ctk, frame, theme, cfg, default_config)
     host_var, port_var, secret_var = _create_connection(ctk, frame, theme, cfg, default_config)
     dc_textbox = _create_dc(ctk, frame, theme, cfg, default_config)
-    # Legacy Cloudflare routing remains available behind the three-mode Bypass
-    # selector, but its old duplicate controls are intentionally not rendered.
+    # Legacy Cloudflare routing remains available behind the Bypass selector,
+    # while its old duplicate controls are intentionally not rendered.
     cfproxy_var = ctk.BooleanVar(master=frame, value=cfg.get("cfproxy", default_config.get("cfproxy", True)))
     h2_var = ctk.BooleanVar(master=frame, value=cfg.get("h2", default_config.get("h2", True)))
     cf_custom_cb_var = ctk.BooleanVar(master=frame, value=cfg.get("cfproxy_user_domain_enabled", False))
@@ -116,9 +113,9 @@ def install_tray_config_form(
         value=", ".join(coerce_domain_list(cfg.get("cfproxy_worker_domain", ""))),
     )
     (
-        bypass_mode_var, bypass_config_path_var, bypass_split_var, bypass_dns_var,
-        bypass_cdn_provider_var, bypass_cdn_sni_var, bypass_cdn_host_var,
-        bypass_cdn_connect_ip_var, bypass_status_label, bypass_status_listener,
+        bypass_mode_var, bypass_cdn_provider_var, bypass_cdn_sni_var,
+        bypass_cdn_host_var, bypass_cdn_connect_ip_var,
+        bypass_status_label, bypass_status_listener,
     ) = _create_bypass(ctk, frame, theme, cfg, default_config)
     verbose_var, advanced_vars = _create_logging(
         ctk, frame, theme, cfg, default_config, no_secure_var,
@@ -139,9 +136,6 @@ def install_tray_config_form(
         appearance_var=appearance_var,
         language_var=language_var,
         bypass_mode_var=bypass_mode_var,
-        bypass_amneziawg_config_path_var=bypass_config_path_var,
-        bypass_amneziawg_split_tunnel_var=bypass_split_var,
-        bypass_dns_var=bypass_dns_var,
         bypass_cdn_provider_var=bypass_cdn_provider_var,
         bypass_cdn_custom_sni_var=bypass_cdn_sni_var,
         bypass_cdn_custom_host_var=bypass_cdn_host_var,
@@ -159,11 +153,6 @@ def _create_header(ctk, frame, theme):
         font=(theme.ui_font_family, 17, "bold"),
         text_color=theme.text_primary, anchor="w",
     ).pack(side="left")
-    ctk.CTkLabel(
-        header, text=f"v{__version__}",
-        font=(theme.ui_font_family, 12),
-        text_color=theme.text_secondary, anchor="e",
-    ).pack(side="right", padx=(4, 0))
 
 
 def _create_interface(ctk, frame, theme, cfg, default_config):
@@ -564,21 +553,6 @@ def validate_config_form(
         if mode is None:
             return t("validation.bad_bypass_mode")
         values["bypass_mode"] = mode
-    if widgets.bypass_amneziawg_config_path_var is not None:
-        values["bypass_amneziawg_config_path"] = (
-            widgets.bypass_amneziawg_config_path_var.get().strip()
-        )
-    if widgets.bypass_amneziawg_split_tunnel_var is not None:
-        values["bypass_amneziawg_split_tunnel"] = bool(
-            widgets.bypass_amneziawg_split_tunnel_var.get()
-        )
-    if widgets.bypass_dns_var is not None:
-        dns = [item.strip() for item in widgets.bypass_dns_var.get().split(",") if item.strip()]
-        try:
-            dns = [str(ipaddress.ip_address(item)) for item in dns]
-        except ValueError:
-            return t("validation.bad_bypass_dns")
-        values["bypass_dns"] = dns
     if widgets.bypass_cdn_provider_var is not None:
         from bypass.cdn import CDN_PROVIDER_IDS
         provider_names = {
@@ -607,8 +581,6 @@ def validate_config_form(
     values.setdefault("bypass_cdn_custom_sni", default_config.get("bypass_cdn_custom_sni", ""))
     values.setdefault("bypass_cdn_custom_host", default_config.get("bypass_cdn_custom_host", ""))
     values.setdefault("bypass_cdn_custom_connect_ip", default_config.get("bypass_cdn_custom_connect_ip", ""))
-    values.setdefault("bypass_amneziawg_split_tunnel",
-                       default_config.get("bypass_amneziawg_split_tunnel", True))
     return validate_settings(values, default_config)
 
 

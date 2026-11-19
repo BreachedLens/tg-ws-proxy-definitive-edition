@@ -79,13 +79,6 @@ class ProxyConfig:
     bypass_mode: str = "alt_cdn"
     bypass_cdn_enabled: bool = True
     bypass_cdn_providers: List[Dict[str, object]] = field(default_factory=list)
-    bypass_amneziawg_enabled: bool = False
-    bypass_amneziawg_config_path: str = ""
-    bypass_amneziawg_binary_path: str = ""
-    bypass_amneziawg_manage_dns: bool = True
-    bypass_amneziawg_network_interface: str = ""
-    bypass_amneziawg_split_tunnel: bool = True
-    bypass_dns: List[str] = field(default_factory=list)
     bypass_cdn_provider: str = "google-gfe"
     bypass_cdn_custom_sni: str = ""
     bypass_cdn_custom_host: str = ""

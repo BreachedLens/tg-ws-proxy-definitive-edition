@@ -321,17 +321,7 @@ async def _handle_client(reader, writer, secret: bytes):
         ctx = _build_crypto_ctx(client_dec_prekey_iv, secret, relay_init)
 
         media_tag = " media" if is_media else ""
-        active_awg = (
-            bridge_module.bypass_manager.get("amneziawg")
-            if bridge_module.bypass_manager is not None else None
-        )
-        awg_selected = (
-            proxy_config.bypass_mode in ("amneziawg", "auto")
-            and active_awg is not None and active_awg.is_configured()
-        )
-        selected_bypass = (
-            awg_selected or proxy_config.bypass_mode == "alt_cdn"
-        )
+        selected_bypass = proxy_config.bypass_mode == "alt_cdn"
         if selected_bypass:
             # Do not let direct WS-pool connections bypass the selected transport.
             ws = None
@@ -415,13 +405,6 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
         mode=proxy_config.bypass_mode,
         cdn_enabled=proxy_config.bypass_cdn_enabled,
         cdn_providers=proxy_config.bypass_cdn_providers,
-        amneziawg_enabled=proxy_config.bypass_amneziawg_enabled,
-        amneziawg_config_path=proxy_config.bypass_amneziawg_config_path,
-        amneziawg_binary_path=proxy_config.bypass_amneziawg_binary_path,
-        amneziawg_manage_dns=proxy_config.bypass_amneziawg_manage_dns,
-        amneziawg_network_interface=proxy_config.bypass_amneziawg_network_interface,
-        amneziawg_split_tunnel=proxy_config.bypass_amneziawg_split_tunnel,
-        dns=proxy_config.bypass_dns,
         cdn_provider=proxy_config.bypass_cdn_provider,
         cdn_custom_sni=proxy_config.bypass_cdn_custom_sni,
         cdn_custom_host=proxy_config.bypass_cdn_custom_host,
@@ -430,27 +413,7 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     bridge_module.bypass_manager = bypass_manager
     clear_active_route()
 
-    awg_transport = bypass_manager.get("amneziawg")
-    awg_profile_present = (
-        awg_transport is not None
-        and os.path.isfile(awg_transport.config_path)
-    )
-    awg_configured = awg_transport is not None and awg_transport.is_configured()
-    awg_required = (
-        proxy_config.bypass_mode == "amneziawg"
-        or (proxy_config.bypass_mode == "auto" and awg_profile_present)
-    )
-    log.info(
-        "Bypass startup: mode=%s AmneziaWG config=%s configured=%s",
-        proxy_config.bypass_mode,
-        proxy_config.bypass_amneziawg_config_path,
-        awg_configured,
-    )
-    if awg_required and not awg_configured:
-        raise RuntimeError(
-            "AmneziaWG is required by bypass mode {} but tunnel profile/binary "
-            "is not configured".format(proxy_config.bypass_mode)
-        )
+    log.info("Bypass startup: mode=%s", proxy_config.bypass_mode)
 
     reset_tcp_backoff()
     ws_pool.reset()
@@ -491,11 +454,6 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     try:
         await bypass_manager.start_all()
     except Exception:
-        if awg_required:
-            log.exception("Required AmneziaWG startup failed; refusing to accept proxy connections")
-            await bypass_manager.stop_all()
-            bridge_module.bypass_manager = None
-            raise
         log.exception("Bypass transport startup failed; starting proxy without it")
 
     try:
@@ -577,11 +535,8 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
 
     log_stats_task = asyncio.create_task(log_stats())
 
-    if awg_required:
-        log.info("Bypass mode %s: direct WS/CF pools disabled", proxy_config.bypass_mode)
-    else:
-        await ws_pool.warmup()
-        await cf_worker_pool.warmup()
+    await ws_pool.warmup()
+    await cf_worker_pool.warmup()
 
     async def _quiet_cancel(t):
         if not t.done():

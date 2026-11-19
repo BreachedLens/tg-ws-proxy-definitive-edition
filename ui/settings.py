@@ -96,8 +96,4 @@ def validate_settings(values: dict, defaults: dict) -> Union[dict, str]:
             config["bypass_cdn_custom_connect_ip"] = str(ipaddress.ip_address(connect_ip))
         except ValueError:
             return t("validation.bad_cdn_connect_ip")
-    for key in ("bypass_amneziawg_split_tunnel",):
-        if key in config:
-            config[key] = bool(config[key])
-
     return config

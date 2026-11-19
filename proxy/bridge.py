@@ -15,13 +15,7 @@ from .raw_websocket import RawWebSocket
 from .pool import cf_worker_pool, ws_pool
 from .network_debug import WsActivity
 from .cf_h2 import bridge_h2
-from bypass import BypassManager, CdnFrontingTransport, ConnectRequest
-
-
-def _awg_route_status(transport) -> str:
-    config_name = transport.config_path.replace("\\", "/").rsplit("/", 1)[-1]
-    split = " [Split: Telegram only]" if getattr(transport, "split_tunnel", False) else ""
-    return "AmneziaWG{} ({})".format(split, config_name)
+from bypass import BypassManager, CdnFrontingTransport
 
 
 def _cdn_route_status(transport) -> str:
@@ -163,67 +157,40 @@ async def do_fallback(reader, writer, relay_init, label,
     ip_table = DC_TEST_IPS if is_test_dc else DC_DEFAULT_IPS
     fallback_dst = ip_table.get(dc)
     worker_domains = proxy_config.cfproxy_worker_domains
-
-    methods: List[str] = []
+    mode = proxy_config.bypass_mode
     manager = manager or bypass_manager
     cdn_transport = manager.get("cdn-fronting") if manager is not None else None
-    awg_transport = manager.get("amneziawg") if manager is not None else None
-    strict_awg = proxy_config.bypass_mode == "amneziawg"
-    selected_cdn = proxy_config.bypass_cdn_provider
-    cloudflare_selected = (
-        selected_cdn == "cloudflare" and proxy_config.bypass_mode == "alt_cdn"
-    )
-    use_cf = (
-        proxy_config.fallback_cfproxy or cloudflare_selected
-        or proxy_config.bypass_mode == "alt_cdn"
-    ) and not is_test_dc
-    if awg_transport is not None:
-        methods.append('bypass_awg')
-    if (isinstance(cdn_transport, CdnFrontingTransport)
-            and not cloudflare_selected and not is_test_dc):
-        methods.append('alt_cdn')
+    cloudflare_selected = mode == "alt_cdn" and proxy_config.bypass_cdn_provider == "cloudflare"
+    methods: List[str] = []
 
-    if worker_domains and fallback_dst and proxy_config.bypass_mode != "alt_cdn":
-        methods.append('cf_worker')
-    if use_cf:
-        methods.append('cf')
-    if proxy_config.bypass_mode == "alt_cdn" and fallback_dst:
-        methods.extend(('ws_pool', 'direct_ws'))
-    if fallback_dst:
-        methods.append('tcp')
+    if mode == "alt_cdn":
+        if isinstance(cdn_transport, CdnFrontingTransport) and not is_test_dc:
+            methods.append("alt_cdn")
+        if not is_test_dc:
+            methods.append("cf")
+        if fallback_dst:
+            methods.extend(("ws_pool", "direct_ws", "tcp"))
+    else:  # legacy; the normal WS pool was already attempted by the client handler
+        if fallback_dst and proxy_config.cfproxy_worker_domains:
+            methods.append("cf_worker")
+        if proxy_config.fallback_cfproxy and not is_test_dc:
+            methods.append("cf")
+        if fallback_dst:
+            methods.append("tcp")
 
     for method in methods:
-        if method == 'bypass_awg' and manager is not None and fallback_dst:
-            try:
-                request = ConnectRequest(fallback_dst, 443, timeout=10.0)
-                if not awg_transport.is_configured() or not awg_transport.is_healthy:
-                    continue
-                result = await awg_transport.connect(request)
-                awg_transport.mark_success()
-                result.writer.write(relay_init)
-                await result.writer.drain()
-            except Exception as exc:
-                awg_transport.mark_failure(exc)
-                log.warning("[%s] DC%d%s AmneziaWG connect failed: %r",
-                            label, dc, media_tag, exc)
-                continue
-            stats.connections_tcp_fallback += 1
-            route = _awg_route_status(awg_transport)
-            set_active_route(route)
-            log.info("[%s] DC%d%s route=amneziawg detail=%s", label, dc, media_tag, route)
-            await _bridge_tcp_reencrypt(reader, writer, result.reader,
-                                        result.writer, label, ctx)
-            return True
-        if method == 'alt_cdn' and cdn_transport is not None and not strict_awg:
-            target_domain = f'kws{dc}.web.telegram.org'
-            kwargs = cdn_transport.websocket_connect_kwargs(
-                fallback_dst or target_domain,
-                path='/apiws_test' if is_test_dc else '/apiws',
-                target_domain=target_domain,
-            )
+        if method == "alt_cdn" and cdn_transport is not None and not cloudflare_selected:
+            target_domain = f"kws{dc}.web.telegram.org"
+            provider = cdn_transport.current_provider
             try:
                 ws = await RawWebSocket.connect(
-                    kwargs.pop('target_ip'), kwargs.pop('domain'), **kwargs)
+                    provider.connect_ip or provider.sni,
+                    provider.host_header or target_domain or provider.sni,
+                    path="/apiws_test" if is_test_dc else "/apiws",
+                    sni=provider.sni,
+                    timeout=10.0,
+                    secure=provider.tls,
+                )
             except Exception as exc:
                 cdn_transport.rotate()
                 log.warning("[%s] DC%d%s alternative CDN failed: %r",
@@ -235,28 +202,26 @@ async def do_fallback(reader, writer, relay_init, label,
             set_active_route(route)
             log.info("[%s] DC%d%s route=alt_cdn detail=%s", label, dc, media_tag, route)
             await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
-                                      dc=dc, is_media=is_media,
-                                      splitter=splitter)
+                                      dc=dc, is_media=is_media, splitter=splitter)
             return True
-        elif method == 'ws_pool' and not strict_awg:
+        if method == "ws_pool":
             try:
                 ws = await ws_pool.get(dc, is_media, is_test_dc=is_test_dc)
             except Exception as exc:
-                log.warning("[%s] DC%d%s direct WS pool failed: %r",
-                            label, dc, media_tag, exc)
+                log.warning("[%s] DC%d%s WS pool failed: %r", label, dc, media_tag, exc)
                 continue
             if ws is not None:
                 stats.connections_ws += 1
-                set_active_route("Alt-CDN fallback (Telegram WS pool)")
-                log.info("[%s] DC%d%s route=alt_cdn_fallback_ws_pool",
-                         label, dc, media_tag)
+                route = ("Legacy proxy (Telegram WS)" if mode == "legacy"
+                         else "Alt-CDN fallback (Telegram WS pool)")
+                set_active_route(route)
+                log.info("[%s] DC%d%s route=ws_pool", label, dc, media_tag)
                 await ws.send(relay_init)
                 await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
-                                          dc=dc, is_media=is_media,
-                                          splitter=splitter)
+                                          dc=dc, is_media=is_media, splitter=splitter)
                 return True
-        elif method == 'direct_ws' and fallback_dst and not strict_awg:
-            path = '/apiws_test' if is_test_dc else '/apiws'
+        elif method == "direct_ws" and fallback_dst:
+            path = "/apiws_test" if is_test_dc else "/apiws"
             for domain in ws_domains(dc, is_media):
                 try:
                     ws = await RawWebSocket.connect(
@@ -269,53 +234,42 @@ async def do_fallback(reader, writer, relay_init, label,
                     continue
                 stats.connections_ws += 1
                 set_active_route("Alt-CDN fallback (direct Telegram WS)")
-                log.info("[%s] DC%d%s route=alt_cdn_fallback_direct_ws",
-                         label, dc, media_tag)
+                log.info("[%s] DC%d%s route=direct_ws", label, dc, media_tag)
                 await ws.send(relay_init)
                 await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
-                                          dc=dc, is_media=is_media,
-                                          splitter=splitter)
+                                          dc=dc, is_media=is_media, splitter=splitter)
                 return True
-        elif method == 'cf_worker' and fallback_dst and not strict_awg:
+        elif method == "cf_worker" and fallback_dst:
             ok = await _cfproxy_worker_fallback(
                 reader, writer, relay_init, label, ctx,
                 dc=dc, is_test_dc=is_test_dc, is_media=is_media,
                 fallback_dst=fallback_dst, splitter=splitter)
             if ok:
-                route = ("Legacy proxy (Cloudflare worker)"
-                         if proxy_config.bypass_mode == "legacy"
-                         else "Alt-CDN (CF worker)")
-                set_active_route(route)
-                log.info("[%s] DC%d%s route=%s", label, dc, media_tag, route)
+                set_active_route("Legacy proxy (Cloudflare worker)")
+                log.info("[%s] DC%d%s route=cf_worker", label, dc, media_tag)
                 return True
-        elif method == 'cf' and not strict_awg:
+        elif method == "cf":
             if is_media and h2_pool is not None and proto_tag is not None:
                 channel = await h2_pool.open(dc, label)
                 if channel is not None:
                     stats.connections_h2 += 1
                     stats.connections_cfproxy += 1
-                    route = ("Legacy proxy (Cloudflare H2)"
-                             if proxy_config.bypass_mode == "legacy"
-                             else "Alt-CDN (CF H2)")
-                    set_active_route(route)
-                    log.info("[%s] DC%d%s route=%s", label, dc, media_tag, route)
+                    set_active_route("Legacy proxy (Cloudflare H2)" if mode == "legacy"
+                                     else "Alt-CDN (CF H2)")
+                    log.info("[%s] DC%d%s route=cf_h2", label, dc, media_tag)
                     await bridge_h2(reader, writer, channel, ctx, proto_tag)
                     return True
             ok = await _cfproxy_fallback(
                 reader, writer, relay_init, label, ctx,
-                dc=dc, is_media=is_media,
-                splitter=splitter)
+                dc=dc, is_media=is_media, splitter=splitter)
             if ok:
-                route = ("Legacy proxy (Cloudflare)"
-                         if proxy_config.bypass_mode == "legacy"
-                         else "Alt-CDN (CF proxy)")
-                set_active_route(route)
-                log.info("[%s] DC%d%s route=%s", label, dc, media_tag, route)
+                set_active_route("Legacy proxy (Cloudflare)" if mode == "legacy"
+                                 else "Alt-CDN (CF proxy)")
+                log.info("[%s] DC%d%s route=cf_proxy", label, dc, media_tag)
                 return True
-        elif method == 'tcp' and fallback_dst and not strict_awg:
+        elif method == "tcp" and fallback_dst:
             ok = await _tcp_fallback(
-                reader, writer, fallback_dst, 443,
-                relay_init, label, ctx)
+                reader, writer, fallback_dst, 443, relay_init, label, ctx)
             if ok:
                 set_active_route("Legacy TCP")
                 log.info("[%s] DC%d%s route=tcp", label, dc, media_tag)
