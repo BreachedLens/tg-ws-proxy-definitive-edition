@@ -1,6 +1,6 @@
 # tg-ws-proxy-definitive-edition
 
-**tg-ws-proxy-definitive-edition** is a fork of [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) maintained at [BreachedLens/tg-ws-proxy-definitive-edition](https://github.com/BreachedLens/tg-ws-proxy-definitive-edition). It extends the local Telegram WebSocket proxy with an out-of-the-box route for networks that block Cloudflare CDN: **Google CDN is selected by default**, without requiring a VPN or administrator privileges. Domain-fronting availability depends on the CDN and network; no provider can be guaranteed to work everywhere.
+**tg-ws-proxy-definitive-edition** is a fork of [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy). It extends the local Telegram WebSocket proxy with an out-of-the-box route for networks that block Cloudflare CDN: **Google CDN is selected by default**, without requiring a VPN or administrator privileges. Domain-fronting availability depends on the CDN and network; no provider can be guaranteed to work everywhere.
 
 The proxy runs locally on your computer, preserves Telegram MTProto encryption, and does not require a separate remote proxy server.
 
