@@ -3,7 +3,7 @@
 import sys
 import os
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
@@ -12,14 +12,24 @@ import customtkinter
 ctk_path = os.path.dirname(customtkinter.__file__)
 certifi_datas = collect_data_files('certifi')
 
-_i18n_path = os.path.join(os.path.dirname(SPEC), os.pardir, 'ui', 'i18n')
-
+_root = os.path.abspath(os.path.join(os.path.dirname(SPEC), os.pardir))
+_i18n_path = os.path.join(_root, 'ui', 'i18n')
+_icon_path = os.path.join(_root, 'icon.ico')
 a = Analysis(
-    [os.path.join(os.path.dirname(SPEC), os.pardir, 'windows.py')],
-    pathex=[],
+    [os.path.join(_root, 'windows.py')],
+    pathex=[_root],
     binaries=[],
-    datas=[(os.path.join(ctk_path, 'assets'), 'customtkinter/assets'), (_i18n_path, 'ui/i18n')] + certifi_datas,
+    datas=[
+        (os.path.join(ctk_path, 'assets'), 'customtkinter/assets'),
+        (_i18n_path, 'ui/i18n'),
+        *collect_data_files('ui'),
+        (_icon_path, '.'),
+    ] + certifi_datas,
     hiddenimports=[
+        'bypass',
+        *collect_submodules('bypass'),
+        'ui',
+        *collect_submodules('ui'),
         'httpx',
         'h2',
         'pystray._win32',
@@ -54,10 +64,8 @@ a.binaries = [
     if not any(ex in name for ex in _PIL_EXCLUDE_PYDS)
 ]
 
-icon_path = os.path.join(os.path.dirname(SPEC), os.pardir, 'icon.ico')
+icon_path = _icon_path
 version_path = os.path.join(os.path.dirname(SPEC), 'version_info.txt')
-if os.path.exists(icon_path):
-    a.datas += [('icon.ico', icon_path, 'DATA')]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -68,7 +76,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='TgWsProxy',
+    name='tg-ws-proxy-definitive',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

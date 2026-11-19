@@ -198,6 +198,7 @@ def load_config() -> dict:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            data.pop("check_updates", None)
             if "cfproxy_user_domain_enabled" not in data:
                 data["cfproxy_user_domain_enabled"] = bool(
                     coerce_domain_list(data.get("cfproxy_user_domain"))
@@ -206,8 +207,26 @@ def load_config() -> dict:
                 data["cfproxy_worker_enabled"] = bool(
                     coerce_domain_list(data.get("cfproxy_worker_domain"))
                 )
+            if data.get("bypass_mode", "alt_cdn") not in ("alt_cdn", "legacy"):
+                data["bypass_mode"] = "alt_cdn"
+            for obsolete_key in (
+                "bypass_amneziawg_conf_path",
+                "bypass_amneziawg_config_path",
+                "bypass_amneziawg_enabled",
+                "bypass_amneziawg_binary_path",
+                "bypass_amneziawg_manage_dns",
+                "bypass_amneziawg_network_interface",
+                "bypass_amneziawg_split_tunnel",
+                "bypass_dns",
+                "bypass_dns_servers",
+            ):
+                data.pop(obsolete_key, None)
+            if data.get("bypass_cdn_provider") not in {
+                    "google-gfe", "fastly", "cloudflare", "akamai", "cloudfront",
+                    "bunny", "gcore", "vercel", "custom"}:
+                data["bypass_cdn_provider"] = DEFAULT_CONFIG["bypass_cdn_provider"]
             for k, v in DEFAULT_CONFIG.items():
-                data.setdefault(k, v)
+                data.setdefault(k, deepcopy(v))
             cfg = data
         except Exception as exc:
             log.warning("Failed to load config: %s", repr(exc))
@@ -305,6 +324,7 @@ def load_icon():
 
 _proxy_thread: Optional[threading.Thread] = None
 _async_stop: Optional[Tuple[asyncio.AbstractEventLoop, asyncio.Event]] = None
+_restart_lock = threading.Lock()
 
 
 def _run_proxy_thread(show_error: Callable[[str], None]) -> None:
@@ -319,7 +339,14 @@ def _run_proxy_thread(show_error: Callable[[str], None]) -> None:
         loop.run_until_complete(_run(stop_event=stop_ev))
     except Exception as exc:
         log.error("Proxy thread crashed: %s", repr(exc))
-        msg, diagnose_called = diagnose_listen_error(exc)
+        try:
+            diagnosis = diagnose_listen_error(exc)
+        except Exception:
+            log.exception("Failed to diagnose proxy startup error")
+            diagnosis = None
+        if not isinstance(diagnosis, tuple) or len(diagnosis) != 2:
+            diagnosis = (None, None)
+        msg, diagnose_called = diagnosis
         if msg:
             show_error(msg)
         if diagnose_called:
@@ -379,20 +406,17 @@ def apply_proxy_config(cfg: dict) -> bool:
     pc.bypass_cdn_enabled = cfg.get(
         "bypass_cdn_enabled", DEFAULT_CONFIG["bypass_cdn_enabled"])
     pc.bypass_cdn_providers = cfg.get("bypass_cdn_providers", [])
-    pc.bypass_amneziawg_enabled = cfg.get(
-        "bypass_amneziawg_enabled", DEFAULT_CONFIG["bypass_amneziawg_enabled"])
-    pc.bypass_amneziawg_config_path = cfg.get(
-        "bypass_amneziawg_config_path",
-        DEFAULT_CONFIG["bypass_amneziawg_config_path"])
-    pc.bypass_amneziawg_binary_path = cfg.get(
-        "bypass_amneziawg_binary_path", "")
-    pc.bypass_amneziawg_manage_dns = cfg.get(
-        "bypass_amneziawg_manage_dns", True)
-    pc.bypass_amneziawg_network_interface = cfg.get(
-        "bypass_amneziawg_network_interface", "")
-    pc.bypass_dns = cfg.get("bypass_dns", ["9.9.9.9", "149.112.112.112"])
-    if pc.bypass_mode not in ("amneziawg", "alt_cdn", "auto", "legacy"):
+    pc.bypass_cdn_provider = cfg.get("bypass_cdn_provider", DEFAULT_CONFIG["bypass_cdn_provider"])
+    pc.bypass_cdn_custom_sni = cfg.get("bypass_cdn_custom_sni", "")
+    pc.bypass_cdn_custom_host = cfg.get("bypass_cdn_custom_host", "")
+    pc.bypass_cdn_custom_connect_ip = cfg.get("bypass_cdn_custom_connect_ip", "")
+    if pc.bypass_mode not in ("alt_cdn", "legacy"):
         log.error("Bad bypass mode: %s", pc.bypass_mode)
+        return False
+    if pc.bypass_cdn_provider not in (
+            "google-gfe", "fastly", "cloudflare", "akamai", "cloudfront",
+            "bunny", "gcore", "vercel", "custom"):
+        log.error("Bad bypass CDN provider: %s", pc.bypass_cdn_provider)
         return False
     return True
 
@@ -416,25 +440,49 @@ def start_proxy(cfg: dict, on_error: Callable[[str], None]) -> None:
     _proxy_thread.start()
 
 
-def stop_proxy() -> None:
+def stop_proxy(*, timeout: Optional[float] = 5.0) -> None:
     global _proxy_thread, _async_stop
-    if _async_stop:
-        loop, stop_ev = _async_stop
-        loop.call_soon_threadsafe(stop_ev.set)
-        if _proxy_thread:
-            _proxy_thread.join(timeout=5)
-            if _proxy_thread.is_alive():
-                log.warning("Proxy thread did not stop within timeout; "
-                            "port may still be in use")
+    thread = _proxy_thread
+    stop_state = _async_stop
+    if stop_state:
+        loop, stop_ev = stop_state
+        try:
+            loop.call_soon_threadsafe(stop_ev.set)
+        except RuntimeError:
+            pass
+    if thread:
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            log.warning("Proxy thread did not stop within timeout; "
+                        "port may still be in use")
+            return
     _proxy_thread = None
+    _async_stop = None
     log.info("Proxy stopped")
 
 
-def restart_proxy(cfg: dict, on_error: Callable[[str], None]) -> None:
-    log.info("Restarting proxy...")
-    stop_proxy()
-    time.sleep(1.0)
-    start_proxy(cfg, on_error)
+def _restart_proxy_worker(cfg: dict, on_error: Callable[[str], None]) -> None:
+    with _restart_lock:
+        log.info("Restarting proxy...")
+        # This runs on a worker thread, so wait for the old event loop to finish
+        # stop_all() before starting a fresh proxy lifecycle.
+        stop_proxy(timeout=None)
+        if _proxy_thread is not None and _proxy_thread.is_alive():
+            log.error("Cannot restart proxy while the old proxy thread is still running")
+            return
+        start_proxy(cfg, on_error)
+
+
+def restart_proxy(cfg: dict, on_error: Callable[[str], None]) -> threading.Thread:
+    """Restart the proxy without blocking the tray/UI caller."""
+    thread = threading.Thread(
+        target=_restart_proxy_worker,
+        args=(cfg, on_error),
+        daemon=True,
+        name="proxy-restart",
+    )
+    thread.start()
+    return thread
 
 
 def tg_proxy_url(cfg: dict) -> str:
@@ -475,101 +523,78 @@ def check_ipv6_warning(show_info: Callable[[str, str], None]) -> None:
     ).start()
 
 
-# update check
-
-def check_update_async(
-    cfg: dict,
-    is_exiting: Callable[[], bool],
-    on_update: Callable[[str, str], None],
-) -> None:
-    """Check the latest release in the background.
-
-    on_update(version, release_page_url) is called from the worker thread
-    when a newer version is available.
-    """
-    if not cfg.get("check_updates", True):
-        return
-
-    def _work() -> None:
-        time.sleep(1.5)
-        if is_exiting():
-            return
-        try:
-            from utils.update_check import RELEASES_PAGE_URL, get_status, run_check
-
-            run_check(__version__)
-            st = get_status()
-            if not st.get("has_update") or is_exiting():
-                return
-            on_update(
-                st.get("latest") or "?",
-                (st.get("html_url") or "").strip() or RELEASES_PAGE_URL,
-            )
-        except Exception as exc:
-            log.warning("Update check failed: %s", repr(exc))
-
-    threading.Thread(target=_work, daemon=True, name="update-check").start()
-
-
-def maybe_notify_update(
-    cfg: dict,
-    is_exiting: Callable[[], bool],
-    ask_open: Callable[[str, str], bool],
-) -> None:
-    """Check for updates and offer to open the release page."""
-    def _on_update(version: str, url: str) -> None:
-        import webbrowser
-
-        from ui.i18n import t
-
-        if ask_open(t("update.ask_open", version=version), t("app.update_title")):
-            webbrowser.open(url)
-
-    check_update_async(cfg, is_exiting, _on_update)
-
-
 # ctk thread (windows / linux)
 
 _ctk_root: Any = None
 _ctk_root_ready = threading.Event()
+_ctk_root_stopped = threading.Event()
+_ctk_root_init_lock = threading.Lock()
 
 
 def ensure_ctk_thread(ctk: Any, mode: str = "auto") -> bool:
     global _ctk_root
     if ctk is None:
         return False
-    if _ctk_root_ready.is_set():
-        return True
 
     def _run():
         global _ctk_root
-        from ui.ctk_theme import apply_ctk_appearance, install_tkinter_variable_del_guard
+        try:
+            from ui.ctk_theme import apply_ctk_appearance, install_tkinter_variable_del_guard
 
-        install_tkinter_variable_del_guard()
-        apply_ctk_appearance(ctk, mode)
-        _ctk_root = ctk.CTk()
-        _ctk_root.withdraw()
-        _ctk_root_ready.set()
-        _ctk_root.mainloop()
+            install_tkinter_variable_del_guard()
+            apply_ctk_appearance(ctk, mode)
+            _ctk_root = ctk.CTk()
+            _ctk_root.withdraw()
+            _ctk_root_ready.set()
+            _ctk_root.mainloop()
+        except BaseException:
+            log.exception("Settings dialog failed")
+            _ctk_root = None
+            _ctk_root_ready.set()
+        finally:
+            _ctk_root_stopped.set()
 
-    threading.Thread(target=_run, daemon=True, name="ctk-root").start()
-    _ctk_root_ready.wait(timeout=5.0)
-    return _ctk_root is not None
+    with _ctk_root_init_lock:
+        if _ctk_root is not None:
+            return True
+        # Allow a later click to retry after an earlier root initialization
+        # raised before the Tk mainloop became available.
+        _ctk_root_ready.clear()
+        _ctk_root_stopped.clear()
+        try:
+            threading.Thread(target=_run, daemon=True, name="ctk-root").start()
+        except BaseException:
+            log.exception("Settings dialog failed")
+            return False
+        _ctk_root_ready.wait(timeout=5.0)
+        if _ctk_root is None and not _ctk_root_ready.is_set():
+            log.error("Settings dialog failed: CTk root initialization timed out")
+        return _ctk_root is not None
 
 
 def ctk_run_dialog(build_fn: Callable[[threading.Event], None]) -> None:
-    if _ctk_root is None:
+    if _ctk_root is None or _ctk_root_stopped.is_set():
+        log.error("Settings dialog failed: CTk root is not running")
         return
     done = threading.Event()
+    invoked = threading.Event()
 
     def _invoke():
+        invoked.set()
         try:
             build_fn(done)
-        except Exception:
-            log.exception("CTk dialog failed")
+        except BaseException:
+            log.exception("Settings dialog failed")
             done.set()
 
-    _ctk_root.after(0, _invoke)
+    try:
+        _ctk_root.after(0, _invoke)
+    except BaseException:
+        log.exception("Settings dialog failed")
+        return
+    if not invoked.wait(timeout=10.0):
+        log.error("Settings dialog failed: UI queue did not dispatch the dialog callback")
+        return
     done.wait()
     import gc
     gc.collect()

@@ -5,6 +5,8 @@ import webbrowser
 
 from typing import Optional, Tuple, Callable
 
+from bypass.base import BypassError
+
 # Windows WinSock error codes (exc.winerror); errno may differ from POSIX.
 _WSA_EACCES = 10013
 _WSA_EFAULT = 10014
@@ -15,13 +17,13 @@ _WSA_EADDRNOTAVAIL = 10049
 def diagnose_listen_error(exc: BaseException) -> Tuple[Optional[str], Optional[Callable]]:
     """Map a listen-socket bind failure to a user-facing message.
 
-    Returns None when the exception is not a recognizable bind failure,
-    so callers can fall back to generic handling.
+    Returns ``(None, None)`` when the exception is not a recognizable bind
+    failure, so callers can fall back to generic handling.
     """
     from ui.i18n import t
 
-    if not isinstance(exc, OSError):
-        return None
+    if isinstance(exc, BypassError) or not isinstance(exc, OSError):
+        return None, None
 
     err = exc.errno
     winerror = getattr(exc, "winerror", None)
