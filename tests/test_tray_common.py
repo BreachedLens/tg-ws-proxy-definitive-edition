@@ -64,9 +64,6 @@ class BypassSettingsFormTest(unittest.TestCase):
             cfproxy_worker_enabled_var=self.Value(False),
             cfproxy_worker_domain_var=self.Value(""),
             bypass_mode_var=self.Value(t("bypass.mode_" + mode)),
-            bypass_amneziawg_config_path_var=self.Value(r"C:\Profiles\warp.conf"),
-            bypass_dns_var=self.Value("9.9.9.9, 149.112.112.112"),
-            bypass_amneziawg_split_tunnel_var=self.Value(True),
             bypass_cdn_provider_var=self.Value(t("bypass.provider_google")),
             bypass_cdn_custom_sni_var=self.Value(""),
             bypass_cdn_custom_host_var=self.Value(""),
@@ -79,28 +76,8 @@ class BypassSettingsFormTest(unittest.TestCase):
         values = validate_config_form(widgets, defaults, include_autostart=False)
         self.assertIsInstance(values, dict)
         self.assertEqual(values["bypass_mode"], "alt_cdn")
-        self.assertEqual(values["bypass_amneziawg_config_path"], r"C:\Profiles\warp.conf")
-        self.assertEqual(values["bypass_dns"], ["9.9.9.9", "149.112.112.112"])
-        self.assertTrue(values["bypass_amneziawg_split_tunnel"])
         self.assertEqual(values["bypass_cdn_provider"], "google-gfe")
         self.assertEqual(values["bypass_cdn_custom_connect_ip"], "")
-
-        widgets.bypass_dns_var.value = "1.1.1.1, 8.8.8.8"
-        changed_values = validate_config_form(widgets, defaults, include_autostart=False)
-        change = prepare_settings(current, changed_values, defaults)
-        self.assertEqual(change.config["bypass_mode"], "alt_cdn")
-        self.assertEqual(change.config["bypass_dns"], ["1.1.1.1", "8.8.8.8"])
-        self.assertIn("bypass_dns", change.changed_keys)
-
-    def test_blank_dns_override_is_valid_and_persisted(self):
-        defaults = default_tray_config()
-        widgets = self._widgets()
-        widgets.bypass_dns_var.value = "  "
-        values = validate_config_form(widgets, defaults, include_autostart=False)
-        self.assertIsInstance(values, dict)
-        self.assertEqual(values["bypass_dns"], [])
-        change = prepare_settings(defaults, values, defaults)
-        self.assertEqual(change.config["bypass_dns"], [])
 
     def test_cdn_provider_and_custom_sni_are_persisted(self):
         from ui.i18n import t
@@ -146,13 +123,6 @@ class BypassSettingsFormTest(unittest.TestCase):
         self.assertIsInstance(
             validate_config_form(widgets, defaults, include_autostart=False), str
         )
-
-    def test_bypass_dns_rejects_invalid_addresses(self):
-        defaults = default_tray_config()
-        widgets = self._widgets()
-        widgets.bypass_dns_var.value = "9.9.9.9, not-an-ip"
-        result = validate_config_form(widgets, defaults, include_autostart=False)
-        self.assertIsInstance(result, str)
 
 
 class ProxyRestartTest(unittest.TestCase):

@@ -9,9 +9,8 @@ How fronting works here:
 1. The TCP connection is opened to the provider's edge — ``connect_ip``
    when set, otherwise plain DNS resolution of the fronting domain.
 2. The TLS ClientHello carries the *fronting* SNI (``provider.sni``).
-3. Application-level traffic (the WebSocket upgrade path and the Host
-   header) carries the real destination, so the CDN edge routes it onwards
-   to Telegram.
+3. The calling application supplies its application protocol and
+   destination headers.
 
 Whether a given CDN honours Host-based routing depends entirely on the
 provider — that is exactly why the provider list is configurable. The two
@@ -32,7 +31,11 @@ from .base import BypassConnectError, BypassTransport, ConnectRequest, ConnectRe
 
 log = logging.getLogger("bypass.cdn")
 
-WS_PATH = "/apiws"
+CLOUDFLARE_PROVIDER = "cloudflare"
+CDN_PROVIDER_IDS = (
+    "google-gfe", CLOUDFLARE_PROVIDER, "fastly", "akamai", "cloudfront",
+    "bunny", "gcore", "vercel", "custom",
+)
 
 
 @dataclass
@@ -81,7 +84,8 @@ class FrontingProvider:
         )
 
 
-#: Stock fronting endpoints. Extend via BypassConfig.cdn_providers.
+#: Stock fronting endpoints. Cloudflare uses the proxy's native routing
+#: implementation (balancer/worker/H2), rather than domain-fronting here.
 BUILTIN_PROVIDERS = {
     "fastly": FrontingProvider(
         name="fastly",
@@ -93,10 +97,37 @@ BUILTIN_PROVIDERS = {
         sni="www.gstatic.com",
         notes="Google frontend; modern GFE often rejects cross-host routing",
     ),
+    "akamai": FrontingProvider(
+        name="akamai",
+        sni="a248.e.akamai.net",
+        notes="Akamai edge; routing behavior depends on the edge configuration",
+    ),
+    "cloudfront": FrontingProvider(
+        name="cloudfront",
+        sni="d111111abcdef8.cloudfront.net",
+        notes="Amazon CloudFront edge; routing behavior depends on distribution config",
+    ),
+    "bunny": FrontingProvider(
+        name="bunny",
+        sni="assets.b-cdn.net",
+        notes="Bunny CDN edge",
+    ),
+    "gcore": FrontingProvider(
+        name="gcore",
+        sni="cdn.gvideo.co",
+        notes="Gcore CDN edge",
+    ),
+    "vercel": FrontingProvider(
+        name="vercel",
+        sni="vercel.com",
+        notes="Vercel edge; routing behavior depends on deployment configuration",
+    ),
 }
 
 #: Default rotation order when the user supplies no custom providers.
-DEFAULT_PROVIDER_NAMES = ("fastly", "google-gfe")
+DEFAULT_PROVIDER_NAMES = (
+    "google-gfe", "fastly", "akamai", "cloudfront", "bunny", "gcore", "vercel",
+)
 
 
 def default_providers() -> List[FrontingProvider]:
@@ -113,8 +144,8 @@ class CdnFrontingTransport(BypassTransport):
     Note on TLS verification: fronting means the certificate will not match
     the fronting SNI, so with ``insecure_tls=True`` (default, the same
     approach as the proxy's own fronting code) certificate validation is
-    disabled. The carried payload is end-to-end encrypted by Telegram
-    (MTProto), so this does not expose message contents.
+    disabled. Application-level end-to-end encryption remains the
+    responsibility of the caller.
     """
 
     name = "cdn-fronting"
@@ -174,30 +205,3 @@ class CdnFrontingTransport(BypassTransport):
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         return await asyncio.open_connection(ip, port, ssl=ctx, server_hostname=sni)
-
-    def websocket_connect_kwargs(
-        self,
-        target_ip: str,
-        path: str = WS_PATH,
-        timeout: float = 10.0,
-        target_domain: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Kwargs for ``proxy.raw_websocket.RawWebSocket.connect`` (Phase 2).
-
-        The returned dict mirrors the existing call signature so the proxy
-        fallback code can switch transports with a one-line change::
-
-            kwargs = cdn_transport.websocket_connect_kwargs(dc_ip, path=path)
-            ws = await RawWebSocket.connect(**kwargs)
-        """
-        provider = self.current_provider
-        if provider is None:
-            raise BypassConnectError("no fronting providers configured")
-        return {
-            "target_ip": provider.connect_ip or provider.sni,
-            "domain": provider.host_header or target_domain or provider.sni,
-            "path": path,
-            "sni": provider.sni,
-            "timeout": timeout,
-            "secure": provider.tls,
-        }
