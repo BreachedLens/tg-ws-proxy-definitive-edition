@@ -103,7 +103,6 @@ from utils.tray_common import (
     load_config,
     load_icon,
     log,
-    maybe_notify_update,
     release_lock,
     restart_proxy,
     save_config,
@@ -235,10 +234,6 @@ def _show_error(text: str, title: Optional[str] = None) -> None:
 
 def _show_info(text: str, title: Optional[str] = None) -> None:
     _messagebox("showinfo", text, title or t("app.name"))
-
-
-def _ask_yes_no(text: str, title: Optional[str] = None) -> bool:
-    return bool(_messagebox("askyesno", text, title or t("app.name")))
 
 
 def _refresh_tray_menu() -> None:
@@ -518,7 +513,6 @@ def run_tray() -> None:
         darwin_nsapplication=_ns_app,
     )
     _tray_icon.run_detached()
-    maybe_notify_update(_config, lambda: _exiting, _ask_yes_no)
     _ctk_root.after(0, _show_first_run)
     log.info("Tray icon running")
     _ctk_root.mainloop()
